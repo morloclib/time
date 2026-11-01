@@ -1,0 +1,11 @@
+name: time
+version: 0.1.0
+homepage: https://github.com/morloclib/time
+synopsis: Instants, durations, civil dates and time formatting
+description: "Type-signature-only module for microsecond instants and durations, UTC offsets, calendar dates, and one strftime subset with the same meaning in every language"
+category: time
+license: MIT
+author: "Zebulun Arendsee"
+maintainer: "z@morloc.io"
+github: https://github.com/morloclib/time
+bug-reports: https://github.com/morloclib/time

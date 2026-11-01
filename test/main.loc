@@ -1,0 +1,230 @@
+module time.test (test)
+
+import root
+import time
+import unittest
+
+test = suiteE runTests
+
+runTests :: Results -> <IO> Results
+runTests s0 = do
+  s1 <- groupE "Clock" testClock s0
+  let s2 = group "Arithmetic" testArith s1
+  let s3 = group "Saturation" testSaturation s2
+  let s4 = group "Civil" testCivil s3
+  let s5 = group "Format" testFormat s4
+  let s6 = group "Parse" testParse s5
+  let s7 = group "Durations as text" testDurationText s6
+  s7
+
+us :: I64 -> Instant
+us = pack
+
+dur :: I64 -> Duration
+dur = pack
+
+isErr :: Try Str a -> Bool
+isErr
+  | (Err _) = True
+  | _ = False
+
+dt :: I32 -> U8 -> U8 -> U8 -> U8 -> U8 -> U32 -> DateTime
+dt y mo d h mi s u = {year = y, month = mo, day = d, hour = h, minute = mi, second = s, micro = u}
+
+-- 2026-10-30T14:05:09.25Z, a Friday, day 303
+t1 :: Instant
+t1 = us 1793369109250000
+
+-- 2000-02-29T00:00:00Z, a Tuesday, day 060
+leap :: Instant
+leap = us 951782400000000
+
+-- 1969-12-31T23:59:59.5Z
+preEpoch :: Instant
+preEpoch = us (-500000)
+
+-- 1900-01-01T00:00:00Z, a Monday
+y1900 :: Instant
+y1900 = us (-2208988800000000)
+
+wd :: U8 -> ?U8
+wd x = x
+
+utc :: Str -> TimeParse
+utc f = {format = f, offset = 0, year = 1970}
+
+fmt :: Str -> UtcOffset -> Instant -> Str
+fmt f o t = match formatTime f o t
+  | (Ok s) = s
+  | (Err e) = "error: " <> e
+
+testClock :: Results -> <IO> Results
+testClock xs = do
+  t <- now
+  o <- localOffset t
+  ( testTrue "now is after 2020" (t > us 1577836800000000)
+  . testInRange "localOffset in range" o (-720) 840
+  ) xs
+
+testArith :: Test
+testArith
+  = testEqual "seconds" (seconds 1) (dur 1000000)
+  . testEqual "minutes" (minutes 1) (dur 60000000)
+  . testEqual "hours" (hours 1) (dur 3600000000)
+  . testEqual "days" (days 1) (dur 86400000000)
+  . testEqual "milliseconds" (milliseconds 1) (dur 1000)
+  . testEqual "microseconds" (microseconds 1) (dur 1)
+  . testEqual "negative seconds" (seconds (-2)) (dur (-2000000))
+  . testEqual "after" (after (seconds 1) t1) (us 1793369110250000)
+  . testEqual "before" (before (seconds 1) t1) (us 1793369108250000)
+  . testEqual "since forward" (since leap t1) (dur 841586709250000)
+  . testEqual "since backward" (since t1 leap) (dur (-841586709250000))
+  . testEqual "after since" (after (since leap t1) leap) t1
+  . testEqual "<> adds" (seconds 1 <> minutes 1) (seconds 61)
+  . testEqual "mempty" (mempty :: Duration) (dur 0)
+  . testEqual "mconcat" (mconcat [seconds 1, seconds 1, milliseconds 1]) (dur 2001000)
+  . testEqual "mconcat empty" (mconcat ([] :: [Duration])) (dur 0)
+  . testTrue "instants ordered" (leap < t1)
+  . testTrue "pre-epoch ordered" (preEpoch < us 0)
+  . testTrue "durations ordered" (seconds (-1) < microseconds 1)
+  . testEqual "fromSeconds" (fromSeconds 951782400) leap
+  . testEqual "fromSeconds negative" (fromSeconds (-1)) (us (-1000000))
+  . testEqual "toSeconds" (toSeconds t1) 1793369109
+  . testEqual "toSeconds floors before epoch" (toSeconds preEpoch) (-1)
+  . testEqual "toSeconds exact negative" (toSeconds (us (-1000000))) (-1)
+
+testSaturation :: Test
+testSaturation
+  = testEqual "after saturates" (after (seconds 1) (us 0x7FFFFFFFFFFFFFFF)) (us 0x7FFFFFFFFFFFFFFF)
+  . testEqual "before saturates" (before (seconds 1) (us (-0x7FFFFFFFFFFFFFFF - 1))) (us (-0x7FFFFFFFFFFFFFFF - 1))
+  . testEqual "since saturates up" (since (us (-0x7FFFFFFFFFFFFFFF - 1)) (us 0x7FFFFFFFFFFFFFFF)) (dur 0x7FFFFFFFFFFFFFFF)
+  . testEqual "since saturates down" (since (us 0x7FFFFFFFFFFFFFFF) (us (-0x7FFFFFFFFFFFFFFF - 1))) (dur (-0x7FFFFFFFFFFFFFFF - 1))
+  . testEqual "<> saturates" (dur 0x7FFFFFFFFFFFFFFF <> dur 1) (dur 0x7FFFFFFFFFFFFFFF)
+  . testEqual "days saturates up" (days 0x7FFFFFFFFFFFFFFF) (dur 0x7FFFFFFFFFFFFFFF)
+  . testEqual "days saturates down" (days (-0x7FFFFFFFFFFFFFFF)) (dur (-0x7FFFFFFFFFFFFFFF - 1))
+  . testEqual "fromSeconds saturates" (fromSeconds 0x7FFFFFFFFFFFFFFF) (us 0x7FFFFFFFFFFFFFFF)
+  . testEqual "largest exact seconds" (seconds 9223372036854) (dur 9223372036854000000)
+  . testEqual "smallest exact seconds" (seconds (-9223372036854)) (dur (-9223372036854000000))
+  . testEqual "after at the edge" (after (dur 1) (us 0x7FFFFFFFFFFFFFFE)) (us 0x7FFFFFFFFFFFFFFF)
+
+testCivil :: Test
+testCivil
+  = testEqual "toDateTime utc" (toDateTime 0 t1) (dt 2026 10 30 14 5 9 250000)
+  . testEqual "toDateTime +05:30" (toDateTime 330 t1) (dt 2026 10 30 19 35 9 250000)
+  . testEqual "toDateTime -08:00 crosses midnight" (toDateTime (-480) leap) (dt 2000 2 28 16 0 0 0)
+  . testEqual "toDateTime pre-epoch" (toDateTime 0 preEpoch) (dt 1969 12 31 23 59 59 500000)
+  . testEqual "toDateTime 1900" (toDateTime 0 y1900) (dt 1900 1 1 0 0 0 0)
+  . testEqual "toDateTime year 1" (toDateTime 0 (us (-62135596800000000))) (dt 1 1 1 0 0 0 0)
+  . testEqual "fromDateTime utc" (fromDateTime 0 (dt 2026 10 30 14 5 9 250000)) (Ok t1)
+  . testEqual "fromDateTime offset" (fromDateTime (-480) (dt 2000 2 28 16 0 0 0)) (Ok leap)
+  . testEqual "fromDateTime leap day" (fromDateTime 0 (dt 2000 2 29 0 0 0 0)) (Ok leap)
+  . testTrue "1900-02-29 rejected" (isErr (fromDateTime 0 (dt 1900 2 29 0 0 0 0)))
+  . testTrue "month 13 rejected" (isErr (fromDateTime 0 (dt 2026 13 1 0 0 0 0)))
+  . testTrue "day 0 rejected" (isErr (fromDateTime 0 (dt 2026 1 0 0 0 0 0)))
+  . testTrue "hour 24 rejected" (isErr (fromDateTime 0 (dt 2026 1 1 24 0 0 0)))
+  . testTrue "second 60 rejected" (isErr (fromDateTime 0 (dt 2026 1 1 0 0 60 0)))
+  . testTrue "micro overflow rejected" (isErr (fromDateTime 0 (dt 2026 1 1 0 0 0 1000000)))
+  . testEqual "weekday friday" (weekday (dt 2026 10 30 0 0 0 0)) (wd 5)
+  . testEqual "weekday monday" (weekday (dt 1900 1 1 0 0 0 0)) (wd 1)
+  . testEqual "weekday sunday" (weekday (dt 2026 11 1 0 0 0 0)) (wd 7)
+  . testEqual "weekday of a leap day" (weekday (dt 2000 2 29 0 0 0 0)) (wd 2)
+  . testEqual "no weekday for 1900-02-29" (weekday (dt 1900 2 29 0 0 0 0)) (Null :: ?U8)
+  . testEqual "no weekday for month 13" (weekday (dt 2026 13 1 0 0 0 0)) (Null :: ?U8)
+
+testFormat :: Test
+testFormat
+  = testEqual "rfc3339" (fmt rfc3339 0 t1) "2026-10-30T14:05:09.25+00:00"
+  . testEqual "rfc3339 no fraction" (fmt rfc3339 0 leap) "2000-02-29T00:00:00+00:00"
+  . testEqual "rfc3339 offset" (fmt rfc3339 330 t1) "2026-10-30T19:35:09.25+05:30"
+  . testEqual "rfc3339 negative offset" (fmt rfc3339 (-480) leap) "2000-02-28T16:00:00-08:00"
+  . testEqual "show" (show t1) "2026-10-30T14:05:09.25+00:00"
+  . testEqual "show pre-epoch" (show preEpoch) "1969-12-31T23:59:59.5+00:00"
+  . testEqual "%z" (fmt "%z" (-90) t1) "-0130"
+  . testEqual "%j %a %b" (fmt "%j %a %b" 0 t1) "303 Fri Oct"
+  . testEqual "%j leap" (fmt "%j %a" 0 leap) "060 Tue"
+  . testEqual "%j day 366" (fmt "%j" 0 (us 1735689599000000)) "366"
+  . testEqual "%s" (fmt "%s" 330 t1) "1793369109"
+  . testEqual "%s negative" (fmt "%s" 0 preEpoch) "-1"
+  . testEqual "%s%f before the epoch" (fmt "%s%f" 0 preEpoch) "-1.5"
+  . testEqual "%%" (fmt "100%% at %H" 0 t1) "100% at 14"
+  . testEqual "syslog" (fmt "%b %d %H:%M:%S" (-480) t1) "Oct 30 06:05:09"
+  . testEqual "microsecond fraction" (fmt "%S%f" 0 (us 1000001)) "01.000001"
+  . testEqual "1900" (fmt "%Y-%m-%d %a" 0 y1900) "1900-01-01 Mon"
+  . testEqual "year 1" (fmt "%Y-%m-%d" 0 (us (-62135596800000000))) "0001-01-01"
+  . testTrue "unknown directive rejected" (isErr (formatTime "%Q" 0 t1))
+  . testTrue "trailing % rejected" (isErr (formatTime "%" 0 t1))
+
+testParse :: Test
+testParse
+  = testEqual "rfc3339" (parseTime (utc rfc3339) "2026-10-30T14:05:09.25+00:00") (Ok t1)
+  . testEqual "rfc3339 Z" (parseTime (utc rfc3339) "2026-10-30T14:05:09.25Z") (Ok t1)
+  . testEqual "rfc3339 offset" (parseTime (utc rfc3339) "2026-10-30T19:35:09.25+05:30") (Ok t1)
+  . testEqual "rfc3339 no fraction" (parseTime (utc rfc3339) "2000-02-29T00:00:00Z") (Ok leap)
+  . testEqual "read" (read "2000-02-28T16:00:00-08:00") (Ok leap)
+  . testEqual "read show round trip" (read (show preEpoch)) (Ok preEpoch)
+  . testEqual "nanoseconds dropped" (parseTime (utc "%s%f") "1.000001999") (Ok (us 1000001))
+  . testEqual "%z" (parseTime (utc "%Y-%m-%d %H:%M %z") "2000-02-28 22:30 -0130") (Ok leap)
+  . testEqual "%z Z" (parseTime (utc "%Y-%m-%d %z") "2000-02-29 Z") (Ok leap)
+  . testEqual "%s" (parseTime (utc "%s") "951782400") (Ok leap)
+  . testEqual "%s%f before the epoch" (parseTime (utc "%s%f") "-1.5") (Ok preEpoch)
+  . testEqual "%j" (parseTime (utc "%Y %j") "2000 060") (Ok leap)
+  . testEqual "compact date" (parseTime (utc "%Y%m%d") "20000229") (Ok leap)
+  . testEqual "compact date and time" (parseTime (utc "%Y%m%dT%H%M%S") "20000229T000000") (Ok leap)
+  . testEqual "five-digit year" (parseTime (utc "%Y-%m-%d") "10000-01-01") (Ok (us 253402300800000000))
+  . testEqual "omitted fields default" (parseTime {format = "%H:%M", offset = 0, year = 2000} "00:00") (Ok (us 946684800000000))
+  . testEqual "%s with an offset ignores it" (parseTime (utc "%s %z") "951782400 +0530") (Ok leap)
+  . testTrue "%s and a disagreeing year rejected" (isErr (parseTime (utc "%s %Y") "951782400 2001"))
+  . testEqual "%s and an agreeing year" (parseTime (utc "%s %Y") "951782400 2000") (Ok leap)
+  . testEqual "syslog defaults"
+      (parseTime {format = "%b %d %H:%M:%S", offset = (-480), year = 2026} "Oct 30 06:05:09")
+      (Ok (us 1793369109000000))
+  . testEqual "space matches a run"
+      (parseTime {format = "%b %d %H:%M:%S", offset = 0, year = 2000} "Feb  9 00:00:00")
+      (Ok (us 950054400000000))
+  . testEqual "month names in any case" (parseTime (utc "%d %b %Y") "29 FEB 2000") (Ok leap)
+  . testEqual "short field" (parseTime (utc "%Y-%m-%d") "2000-2-29") (Ok leap)
+  . testEqual "nginx"
+      (parseTime (utc "%d/%b/%Y:%H:%M:%S %z") "29/Feb/2000:01:00:00 +0100")
+      (Ok leap)
+  . testEqual "agreeing weekday" (parseTime (utc "%a %Y-%m-%d") "Tue 2000-02-29") (Ok leap)
+  . testTrue "disagreeing weekday rejected" (isErr (parseTime (utc "%a %Y-%m-%d") "Wed 2000-02-29"))
+  . testTrue "disagreeing day of year rejected" (isErr (parseTime (utc "%Y %j %m %d") "2000 061 02 29"))
+  . testTrue "trailing text rejected" (isErr (parseTime (utc "%Y") "2000x"))
+  . testTrue "missing text rejected" (isErr (parseTime (utc "%Y-%m") "2000"))
+  . testTrue "literal mismatch rejected" (isErr (parseTime (utc "%Y-%m-%d") "2000/02/29"))
+  . testTrue "invalid date rejected" (isErr (parseTime (utc "%Y-%m-%d") "2001-02-29"))
+  . testTrue "second 60 rejected" (isErr (parseTime (utc "%Y-%m-%d %H:%M:%S") "2000-02-29 23:59:60"))
+  . testTrue "bad month name rejected" (isErr (parseTime (utc "%b") "Foo"))
+  . testTrue "unknown directive rejected" (isErr (parseTime (utc "%Q") "x"))
+  . testTrue "ten fraction digits rejected" (isErr (parseTime (utc "%s%f") "1.0000000001"))
+
+readDur :: Str -> Try Str Duration
+readDur s = read s
+
+testDurationText :: Test
+testDurationText
+  = testEqual "zero" (show (dur 0)) "0s"
+  . testEqual "us" (show (dur 750)) "750us"
+  . testEqual "ms" (show (dur 1500)) "1.5ms"
+  . testEqual "whole ms" (show (milliseconds 2)) "2ms"
+  . testEqual "s" (show (seconds 1)) "1s"
+  . testEqual "fraction s" (show (dur 3500000)) "3.5s"
+  . testEqual "microsecond s" (show (dur 1000001)) "1.000001s"
+  . testEqual "minutes" (show (minutes 1 <> milliseconds 500)) "1m0.5s"
+  . testEqual "hours" (show (hours 72 <> minutes 3)) "72h3m0s"
+  . testEqual "negative" (show (hours (-2) <> minutes (-45))) "-2h45m0s"
+  . testEqual "most negative" (show (dur (-0x7FFFFFFFFFFFFFFF - 1))) "-2562047788h0m54.775808s"
+  . testEqual "show" (show (seconds 90)) "1m30s"
+  . testEqual "parse" (read "1h30m") (Ok (minutes 90))
+  . testEqual "parse fraction" (read "2.5s") (Ok (milliseconds 2500))
+  . testEqual "parse sign" (read "-90us") (Ok (microseconds (-90)))
+  . testEqual "parse zero" (read "0") (Ok (dur 0))
+  . testEqual "parse drops below a microsecond" (read "1.0000019s") (Ok (dur 1000001))
+  . testEqual "parse repeated units add" (read "1m1m") (Ok (minutes 2))
+  . testEqual "read" (read "1.5ms") (Ok (dur 1500))
+  . testEqual "round trip" (read (show (dur (-0x7FFFFFFFFFFFFFFF - 1)))) (Ok (dur (-0x7FFFFFFFFFFFFFFF - 1)))
+  . testEqual "round trip mixed" (read (show (dur 93784000005))) (Ok (dur 93784000005))
+  . testTrue "empty rejected" (isErr (readDur ""))
+  . testTrue "missing unit rejected" (isErr (readDur "5"))
+  . testTrue "unknown unit rejected" (isErr (readDur "5d"))
+  . testTrue "overflow rejected" (isErr (readDur "9999999999999h"))

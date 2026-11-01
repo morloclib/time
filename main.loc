@@ -1,0 +1,233 @@
+--' Instants, durations, civil dates and time formatting
+--'
+--' An `Instant` is a point on the UTC time line and a `Duration` a signed
+--' span, both in microseconds, so neither can be mistaken for the other or
+--' for a count of seconds. Microseconds stay exact as JSON numbers in the
+--' years 1685 to 2255. Arithmetic saturates at the ends of the I64 range
+--' rather than overflowing. Civil dates exist only as a `DateTime` read at a
+--' fixed `UtcOffset`; there is no time zone database and no leap second.
+--'
+--' `formatTime` and `parseTime` implement one strftime subset with the same
+--' meaning in every language, not the host's strftime:
+--'
+--'   %Y  year, at least 4 digits, - before a negative one  %m  month 01-12
+--'   %d  day 01-31     %H  hour 00-23     %M  minute 00-59
+--'   %S  second 00-59  %j  day of the year 001-366
+--'   %f  "." and the fraction of a second, up to 6 digits with trailing
+--'       zeros dropped; nothing when the fraction is zero
+--'   %s  seconds since the epoch, rounded toward the past
+--'   %a  Mon..Sun      %b  Jan..Dec
+--'   %z  offset as +hhmm                %:z offset as +hh:mm
+--'   %%  a literal %
+--'
+--' When parsing:
+--'
+--' - A numeric field reads at most its width in digits (%m %d %H %M %S: 2,
+--'   %j: 3) and accepts fewer. %Y reads an optional - and at most 4 digits when
+--'   the next item of the format is a numeric directive, and all the
+--'   digits there are otherwise. %s reads an optional - and all the digits.
+--' - %f reads a . and 1 to 9 digits, or nothing, dropping digits past the
+--'   sixth. With %s it is added to those seconds, which are rounded toward
+--'   the past, so -1.5 is half a second before the epoch (as `date
+--'   +%s.%N` writes it).
+--' - %a and %b match in any case; %z and %:z also accept Z.
+--' - A space in the format matches one or more spaces.
+--' - Fields left out are the TimeParse year, month 1, day 1, and zero for
+--'   the time of day and the fraction.
+--' - Fields that say the same thing twice must agree: %a with the date, %j
+--'   with %m and %d, and %s with any date or time field but %f, read at
+--'   the offset given or assumed. With %s, an offset is read but does not
+--'   change the instant.
+--'
+--' Any other directive is an error.
+module time (*)
+
+import root
+
+
+-- Types
+---------
+
+--' A point in time, in microseconds since 1970-01-01T00:00:00Z
+--' @metavar INSTANT
+newtype Instant = I64 deriving (Packable, Eq, Ord)
+
+--' A signed span of time, in microseconds
+--'
+--' Its text form (show) is 0s for zero; under a millisecond, whole
+--' microseconds (750us); under a second, milliseconds with any fraction
+--' (1.5ms); otherwise hours, minutes and seconds, leaving out leading zero
+--' units, with the fraction of a second (3m0.5s, 72h3m0s). A negative
+--' duration starts with -.
+--'
+--' Reading (read) accepts an optional sign and one or more numbers, each
+--' with an optional fraction and a unit of h, m, s, ms or us (1h30m, 2.5s,
+--' -90us); 0 alone is zero. Repeated units add, and digits below a
+--' microsecond are dropped. It reads everything show writes, and fails on
+--' a value outside the I64 range of microseconds.
+--' @metavar DURATION
+newtype Duration = I64 deriving (Packable, Eq, Ord)
+
+--' Offset from UTC in minutes, east positive
+--'
+--' UTC+05:30 is 330, UTC-08:00 is -480.
+--' @metavar MINUTES
+type UtcOffset = I32
+
+--' A civil date and wall-clock time, with no offset of its own
+--' @metavar DATETIME
+record DateTime where
+  --' Year in the proleptic Gregorian calendar, 0 being 1 BC
+  year :: I32
+  --' Month, 1 to 12
+  month :: U8
+  --' Day of the month, 1 to 31
+  day :: U8
+  --' Hour, 0 to 23
+  hour :: U8
+  --' Minute, 0 to 59
+  minute :: U8
+  --' Second, 0 to 59
+  second :: U8
+  --' Microseconds past the second, 0 to 999999
+  micro :: U32
+
+--' How to read a time from text
+--'
+--' The offset and year fill in what the format leaves out, so that logs
+--' with no zone and no year (syslog) can be read.
+--' @metavar TIME_PARSE
+record TimeParse where
+  --' Format, in the subset described in the module help
+  format :: Str
+  --' Offset to assume when the format has no %z, %:z or %s
+  offset :: UtcOffset
+  --' Year to assume when the format has no %Y or %s
+  year :: I32
+
+
+-- The clock
+-------------
+
+--' Current time from the system clock
+now :: <IO> Instant
+
+--' Offset of the system time zone at an instant
+--'
+--' Follows `TZ` and the system zone files, so it differs across daylight
+--' saving changes.
+localOffset :: Instant -> <IO> UtcOffset
+
+
+-- Arithmetic
+--------------
+
+--' The instant a duration after another
+after :: Duration -> Instant -> Instant
+after d t = pack (addSat (unpack t :: I64) (unpack d))
+
+--' The instant a duration before another
+before :: Duration -> Instant -> Instant
+before d t = pack (subSat (unpack t :: I64) (unpack d))
+
+--' Time elapsed from the first instant to the second
+--'
+--' Negative when the second is earlier.
+since :: Instant -> Instant -> Duration
+since t0 t1 = pack (subSat (unpack t1 :: I64) (unpack t0))
+
+instance Semigroup Duration where
+  (<>) a b = pack (addSat (unpack a :: I64) (unpack b))
+
+instance Monoid Duration where
+  mempty = pack (0 :: I64)
+  mconcat xs = fold (<>) mempty xs
+
+--' A number of microseconds
+microseconds :: I64 -> Duration
+microseconds n = pack n
+
+--' A number of milliseconds
+milliseconds :: I64 -> Duration
+milliseconds n = pack (mulSat 1000 n)
+
+--' A number of seconds
+seconds :: I64 -> Duration
+seconds n = pack (mulSat 1000000 n)
+
+--' A number of minutes
+minutes :: I64 -> Duration
+minutes n = pack (mulSat 60000000 n)
+
+--' A number of hours
+hours :: I64 -> Duration
+hours n = pack (mulSat 3600000000 n)
+
+--' A number of 24-hour days
+days :: I64 -> Duration
+days n = pack (mulSat 86400000000 n)
+
+
+-- Conversion
+--------------
+
+--' The instant a whole number of seconds after the epoch
+--'
+--' Reads the `Timestamp` values that `shell` gives in `FileStat`.
+fromSeconds :: I64 -> Instant
+fromSeconds s = pack (mulSat 1000000 s)
+
+--' Whole seconds since the epoch, rounded toward the past
+toSeconds :: Instant -> I64
+
+--' The civil date and time of an instant at an offset
+toDateTime :: UtcOffset -> Instant -> DateTime
+
+--' The instant of a civil date and time at an offset
+--'
+--' Fails when a field is out of range or the day does not exist in its
+--' month, naming the field.
+fromDateTime :: UtcOffset -> DateTime -> Try Str Instant
+
+--' Day of the week, 1 for Monday to 7 for Sunday
+--'
+--' Null when the date does not exist.
+weekday :: DateTime -> ?U8
+
+
+-- Text
+--------
+
+--' Format an instant at an offset
+--'
+--' Fails on a directive outside the subset in the module help.
+--' @epilogue
+--'   formatTime "%Y-%m-%dT%H:%M:%S%f%:z" 0 t  -- 2026-10-30T14:05:09.25+00:00
+--'   formatTime "%b %d %H:%M:%S" (-480) t      -- Oct 30 06:05:09
+formatTime ::
+  --' Format, in the subset described in the module help
+  Str ->
+  UtcOffset ->
+  Instant ->
+  Try Str Str
+
+--' Parse an instant from text
+--'
+--' Fails when the text does not match the format in full, naming the
+--' position and the directive.
+parseTime :: TimeParse -> Str -> Try Str Instant
+
+--' RFC 3339 format, the text form of an instant
+rfc3339 :: Str
+rfc3339 = "%Y-%m-%dT%H:%M:%S%f%:z"
+
+instance Show Instant where
+  show t = match formatTime rfc3339 0 t
+    | (Ok s) = s
+    | (Err e) = e
+
+instance Readable Instant where
+  read s = parseTime {format = rfc3339, offset = 0, year = 1970} s
+
+instance Show Duration
+instance Readable Duration
