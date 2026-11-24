@@ -1,10 +1,11 @@
 --' Instants, durations, civil dates and time formatting
 --'
---' An `Instant` is a point on the UTC time line and a `Duration` a signed
---' span, both in microseconds, so neither can be mistaken for the other or
---' for a count of seconds. Microseconds stay exact as JSON numbers in the
---' years 1685 to 2255. Arithmetic saturates at the ends of the I64 range
---' rather than overflowing. Civil dates exist only as a `DateTime` read at a
+--' An `Instant` is a point on the UTC time line and a `Duration` a span
+--' that is never negative, both in microseconds, so neither can be mistaken
+--' for the other or for a count of seconds. Microseconds stay exact as JSON
+--' numbers in the years 1685 to 2255. Arithmetic saturates rather than
+--' overflowing: instants at the ends of the I64 range, durations at 0 and
+--' at the top of the U64 range. Civil dates exist only as a `DateTime` read at a
 --' fixed `UtcOffset`; there is no time zone database and no leap second.
 --'
 --' `formatTime` and `parseTime` implement one strftime subset with the same
@@ -52,21 +53,20 @@ import root
 --' @metavar INSTANT
 newtype Instant = I64 deriving (Packable, Eq, Ord)
 
---' A signed span of time, in microseconds
+--' A span of time, in microseconds
 --'
 --' Its text form (show) is 0s for zero; under a millisecond, whole
 --' microseconds (750us); under a second, milliseconds with any fraction
 --' (1.5ms); otherwise hours, minutes and seconds, leaving out leading zero
---' units, with the fraction of a second (3m0.5s, 72h3m0s). A negative
---' duration starts with -.
+--' units, with the fraction of a second (3m0.5s, 72h3m0s).
 --'
---' Reading (read) accepts an optional sign and one or more numbers, each
---' with an optional fraction and a unit of h, m, s, ms or us (1h30m, 2.5s,
---' -90us); 0 alone is zero. Repeated units add, and digits below a
---' microsecond are dropped. It reads everything show writes, and fails on
---' a value outside the I64 range of microseconds.
+--' Reading (read) accepts one or more numbers, each with an optional
+--' fraction and a unit of h, m, s, ms or us (1h30m, 2.5s, 90us); 0 alone
+--' is zero. Repeated units add, and digits below a microsecond are
+--' dropped. It reads everything show writes, and fails on a sign and on a
+--' value outside the U64 range of microseconds.
 --' @metavar DURATION
-newtype Duration = I64 deriving (Packable, Eq, Ord)
+newtype Duration = U64 deriving (Packable, Eq, Ord)
 
 --' Offset from UTC in minutes, east positive
 --'
@@ -122,49 +122,62 @@ localOffset :: Instant -> <IO> UtcOffset
 -- Arithmetic
 --------------
 
+--' Microseconds from the earliest instant to an instant
+sinceEarliest :: Instant -> U64
+
+--' The instant a number of microseconds after the earliest instant
+earliestPlus :: U64 -> Instant
+
 --' The instant a duration after another
 after :: Duration -> Instant -> Instant
-after d t = pack (addSat (unpack t :: I64) (unpack d))
+after d t = earliestPlus (addSat (sinceEarliest t) (unpack d))
 
 --' The instant a duration before another
 before :: Duration -> Instant -> Instant
-before d t = pack (subSat (unpack t :: I64) (unpack d))
+before d t = earliestPlus (subSat (sinceEarliest t) (unpack d))
 
 --' Time elapsed from the first instant to the second
 --'
---' Negative when the second is earlier.
+--' Zero when the second is earlier, as when the system clock is set back
+--' between two readings of `now`.
 since :: Instant -> Instant -> Duration
-since t0 t1 = pack (subSat (unpack t1 :: I64) (unpack t0))
+since t0 t1 = pack (subSat (sinceEarliest t1) (sinceEarliest t0))
+
+--' A duration shortened by another, zero when the other is longer
+--'
+--' `shorten a b` is b less a.
+shorten :: Duration -> Duration -> Duration
+shorten a b = pack (subSat (unpack b :: U64) (unpack a))
 
 instance Semigroup Duration where
-  (<>) a b = pack (addSat (unpack a :: I64) (unpack b))
+  (<>) a b = pack (addSat (unpack a :: U64) (unpack b))
 
 instance Monoid Duration where
-  mempty = pack (0 :: I64)
+  mempty = pack (0 :: U64)
   mconcat xs = fold (<>) mempty xs
 
 --' A number of microseconds
-microseconds :: I64 -> Duration
+microseconds :: U64 -> Duration
 microseconds n = pack n
 
 --' A number of milliseconds
-milliseconds :: I64 -> Duration
+milliseconds :: U64 -> Duration
 milliseconds n = pack (mulSat 1000 n)
 
 --' A number of seconds
-seconds :: I64 -> Duration
+seconds :: U64 -> Duration
 seconds n = pack (mulSat 1000000 n)
 
 --' A number of minutes
-minutes :: I64 -> Duration
+minutes :: U64 -> Duration
 minutes n = pack (mulSat 60000000 n)
 
 --' A number of hours
-hours :: I64 -> Duration
+hours :: U64 -> Duration
 hours n = pack (mulSat 3600000000 n)
 
 --' A number of 24-hour days
-days :: I64 -> Duration
+days :: U64 -> Duration
 days n = pack (mulSat 86400000000 n)
 
 

@@ -20,8 +20,17 @@ runTests s0 = do
 us :: I64 -> Instant
 us = pack
 
-dur :: I64 -> Duration
+dur :: U64 -> Duration
 dur = pack
+
+dmax :: Duration
+dmax = dur 0xFFFFFFFFFFFFFFFF
+
+imin :: Instant
+imin = us (-0x7FFFFFFFFFFFFFFF - 1)
+
+imax :: Instant
+imax = us 0x7FFFFFFFFFFFFFFF
 
 isErr :: Try Str a -> Bool
 isErr
@@ -74,19 +83,26 @@ testArith
   . testEqual "days" (days 1) (dur 86400000000)
   . testEqual "milliseconds" (milliseconds 1) (dur 1000)
   . testEqual "microseconds" (microseconds 1) (dur 1)
-  . testEqual "negative seconds" (seconds (-2)) (dur (-2000000))
   . testEqual "after" (after (seconds 1) t1) (us 1793369110250000)
   . testEqual "before" (before (seconds 1) t1) (us 1793369108250000)
   . testEqual "since forward" (since leap t1) (dur 841586709250000)
-  . testEqual "since backward" (since t1 leap) (dur (-841586709250000))
+  . testEqual "since backward is zero" (since t1 leap) (dur 0)
+  . testEqual "since across the epoch" (since preEpoch (us 1500000)) (seconds 2)
   . testEqual "after since" (after (since leap t1) leap) t1
+  . testEqual "before since" (before (since leap t1) t1) leap
+  . testEqual "after across the epoch" (after (seconds 2) (us (-1000000))) (us 1000000)
+  . testEqual "before across the epoch" (before (seconds 2) (us 1000000)) (us (-1000000))
   . testEqual "<> adds" (seconds 1 <> minutes 1) (seconds 61)
   . testEqual "mempty" (mempty :: Duration) (dur 0)
+  . testEqual "mempty identity" (mempty <> seconds 3) (seconds 3)
   . testEqual "mconcat" (mconcat [seconds 1, seconds 1, milliseconds 1]) (dur 2001000)
   . testEqual "mconcat empty" (mconcat ([] :: [Duration])) (dur 0)
+  . testEqual "shorten" (shorten (seconds 1) (minutes 1)) (seconds 59)
+  . testEqual "shorten to zero" (shorten (seconds 1) (seconds 1)) (dur 0)
+  . testEqual "shorten past zero is zero" (shorten (minutes 1) (seconds 1)) (dur 0)
   . testTrue "instants ordered" (leap < t1)
   . testTrue "pre-epoch ordered" (preEpoch < us 0)
-  . testTrue "durations ordered" (seconds (-1) < microseconds 1)
+  . testTrue "durations ordered" (dur 0 < microseconds 1)
   . testEqual "fromSeconds" (fromSeconds 951782400) leap
   . testEqual "fromSeconds negative" (fromSeconds (-1)) (us (-1000000))
   . testEqual "toSeconds" (toSeconds t1) 1793369109
@@ -95,16 +111,26 @@ testArith
 
 testSaturation :: Test
 testSaturation
-  = testEqual "after saturates" (after (seconds 1) (us 0x7FFFFFFFFFFFFFFF)) (us 0x7FFFFFFFFFFFFFFF)
-  . testEqual "before saturates" (before (seconds 1) (us (-0x7FFFFFFFFFFFFFFF - 1))) (us (-0x7FFFFFFFFFFFFFFF - 1))
-  . testEqual "since saturates up" (since (us (-0x7FFFFFFFFFFFFFFF - 1)) (us 0x7FFFFFFFFFFFFFFF)) (dur 0x7FFFFFFFFFFFFFFF)
-  . testEqual "since saturates down" (since (us 0x7FFFFFFFFFFFFFFF) (us (-0x7FFFFFFFFFFFFFFF - 1))) (dur (-0x7FFFFFFFFFFFFFFF - 1))
-  . testEqual "<> saturates" (dur 0x7FFFFFFFFFFFFFFF <> dur 1) (dur 0x7FFFFFFFFFFFFFFF)
-  . testEqual "days saturates up" (days 0x7FFFFFFFFFFFFFFF) (dur 0x7FFFFFFFFFFFFFFF)
-  . testEqual "days saturates down" (days (-0x7FFFFFFFFFFFFFFF)) (dur (-0x7FFFFFFFFFFFFFFF - 1))
-  . testEqual "fromSeconds saturates" (fromSeconds 0x7FFFFFFFFFFFFFFF) (us 0x7FFFFFFFFFFFFFFF)
-  . testEqual "largest exact seconds" (seconds 9223372036854) (dur 9223372036854000000)
-  . testEqual "smallest exact seconds" (seconds (-9223372036854)) (dur (-9223372036854000000))
+  = testEqual "after saturates" (after (seconds 1) imax) imax
+  . testEqual "before saturates" (before (seconds 1) imin) imin
+  . testEqual "after the longest duration" (after dmax imin) imax
+  . testEqual "before the longest duration" (before dmax imax) imin
+  . testEqual "since the whole range" (since imin imax) dmax
+  . testEqual "since the whole range backward" (since imax imin) (dur 0)
+  . testEqual "since the epoch from the earliest" (since imin (us 0)) (dur 0x8000000000000000)
+  . testEqual "<> saturates" (dmax <> dur 1) dmax
+  . testEqual "<> associative at the top"
+      ((dur 0xFFFFFFFFFFFFFFFE <> dur 1) <> dur 1)
+      (dur 0xFFFFFFFFFFFFFFFE <> (dur 1 <> dur 1))
+  . testEqual "<> associative past the top"
+      ((dmax <> dmax) <> dur 5)
+      (dmax <> (dmax <> dur 5))
+  . testEqual "mconcat saturates" (mconcat [dmax, seconds 1, seconds 1]) dmax
+  . testEqual "shorten the longest" (shorten (dur 1) dmax) (dur 0xFFFFFFFFFFFFFFFE)
+  . testEqual "days saturates" (days 0xFFFFFFFFFFFFFFFF) dmax
+  . testEqual "fromSeconds saturates" (fromSeconds 0x7FFFFFFFFFFFFFFF) imax
+  . testEqual "largest exact seconds" (seconds 18446744073709) (dur 18446744073709000000)
+  . testEqual "seconds saturates past it" (seconds 18446744073710) dmax
   . testEqual "after at the edge" (after (dur 1) (us 0x7FFFFFFFFFFFFFFE)) (us 0x7FFFFFFFFFFFFFFF)
 
 testCivil :: Test
@@ -212,17 +238,18 @@ testDurationText
   . testEqual "microsecond s" (show (dur 1000001)) "1.000001s"
   . testEqual "minutes" (show (minutes 1 <> milliseconds 500)) "1m0.5s"
   . testEqual "hours" (show (hours 72 <> minutes 3)) "72h3m0s"
-  . testEqual "negative" (show (hours (-2) <> minutes (-45))) "-2h45m0s"
-  . testEqual "most negative" (show (dur (-0x7FFFFFFFFFFFFFFF - 1))) "-2562047788h0m54.775808s"
+  . testEqual "longest" (show dmax) "5124095576h1m49.551615s"
   . testEqual "show" (show (seconds 90)) "1m30s"
   . testEqual "parse" (read "1h30m") (Ok (minutes 90))
   . testEqual "parse fraction" (read "2.5s") (Ok (milliseconds 2500))
-  . testEqual "parse sign" (read "-90us") (Ok (microseconds (-90)))
+  . testTrue "minus sign rejected" (isErr (readDur "-90us"))
+  . testTrue "plus sign rejected" (isErr (readDur "+90us"))
   . testEqual "parse zero" (read "0") (Ok (dur 0))
   . testEqual "parse drops below a microsecond" (read "1.0000019s") (Ok (dur 1000001))
   . testEqual "parse repeated units add" (read "1m1m") (Ok (minutes 2))
   . testEqual "read" (read "1.5ms") (Ok (dur 1500))
-  . testEqual "round trip" (read (show (dur (-0x7FFFFFFFFFFFFFFF - 1)))) (Ok (dur (-0x7FFFFFFFFFFFFFFF - 1)))
+  . testEqual "round trip" (read (show dmax)) (Ok dmax)
+  . testTrue "one past the longest rejected" (isErr (readDur "5124095576h1m49.551616s"))
   . testEqual "round trip mixed" (read (show (dur 93784000005))) (Ok (dur 93784000005))
   . testTrue "empty rejected" (isErr (readDur ""))
   . testTrue "missing unit rejected" (isErr (readDur "5"))
